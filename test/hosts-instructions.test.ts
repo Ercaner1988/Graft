@@ -18,6 +18,8 @@ test('canonical body names the three essentials', () => {
   assert.match(b, /local, regenerable cache/, 'graft/ is a cache, not a committed artifact (#80)');
   assert.match(b, /gitignored/, 'tells the agent the graph is not in git (#80)');
   assert.doesNotMatch(b, /through git/, 'must not claim git carries the graph (#80)');
+  assert.match(b, /npx -y @nanonets\/graft/, 'tells the agent how to run without a global install');
+  assert.match(b, /does not install it/, 'says graft init does not put the CLI on PATH');
   assert.ok(!/\bhook|statusline\b/i.test(b), 'no host-specific machinery in the shared body');
 });
 

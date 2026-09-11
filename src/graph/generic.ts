@@ -54,6 +54,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "ruby", exts: [".rb"], wasm: "ruby" },
   { name: "c_sharp", exts: [".cs"], wasm: "c_sharp" },
   // These ship a tags.scm (calls + symbols); ocaml has none and uses the
+  // These ship a tags.scm (calls + symbols); zig has none and uses the
   // node-kind walker fallback (symbols only) — still one row, zero query.
   // These ship a tags.scm (calls + symbols); ocaml/zig/html have none and use
   // the node-kind walker fallback (symbols only) — still one row, zero query.

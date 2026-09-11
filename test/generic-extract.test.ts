@@ -508,6 +508,34 @@ test("Zig fn/const struct/named test become symbols; call edges resolve; unnamed
   const symbols = nodes.filter((n) => n.kind !== "file");
   const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
   assert.deepEqual(kinds, ["function:calls helper", "function:helper", "function:run", "struct:Point"]);
+// #198: OCaml is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// minted `let helper x = …` as kind `variable` (`value_definition` matches
+// `(^|_)(val|…)`) and emitted no call edges.
+const OCAML = `let helper x = 1
+
+let rec go x = helper x
+
+let n = 1
+
+module M = struct
+  let wrap x = go x
+end
+
+type t = { n : int }
+`;
+
+test("genericLangOf routes .ml/.mli to the breadth tier", () => {
+  assert.equal(genericLangOf("lib/example.ml")?.name, "ocaml");
+  assert.equal(genericLangOf("lib/example.mli")?.name, "ocaml");
+});
+
+test("OCaml let/let rec/module/type become symbols; call edges resolve; bare lets stay out (#198)", async () => {
+  await warmGenericGrammars(["ocaml"]);
+  assert.ok(isWarm("ocaml"), "ocaml grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("lib/example.ml", OCAML, "ocaml");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
+  assert.deepEqual(kinds, ["function:go", "function:helper", "function:wrap", "module:M", "type:t"]);
 
   const edges = resolveEdges(nodes, rawEdges);
   const calls = edges
@@ -581,4 +609,6 @@ test("HTML templates are findable by name after build — grep content, ask/reso
 
   const chk = await checkGraph(dir);
   assert.equal(chk.ok, true, `check OK on an html+py repo (added=${chk.added}, removed=${chk.removed})`);
+  assert.ok(calls.includes("go→helper"), `go → helper (got ${calls.join(", ")})`);
+  assert.ok(calls.includes("wrap→go"), `M.wrap → go (got ${calls.join(", ")})`);
 });

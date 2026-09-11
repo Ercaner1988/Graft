@@ -171,15 +171,20 @@ test("discoverWorkspaceChildren finds immediate git children only", () => {
   rmSync(d, { recursive: true, force: true });
 });
 
-test("discoverWorkspaceChildren follows a symlinked child repo, not dangling or cyclic links (#319)", () => {
+test("discoverWorkspaceChildren follows a symlinked child repo, not dangling or cyclic links (#319)", (t) => {
   const d = fx({ "repoA/x.ts": "1" });
   mkdirSync(join(d, "repoA/.git"), { recursive: true });
   const outside = fx({ "repoC/src/a.py": "1" });
   mkdirSync(join(outside, "repoC/.git"), { recursive: true });
-  symlinkSync(join(outside, "repoC"), join(d, "repoC-link")); // a symlink to a repo elsewhere
-  symlinkSync(join(d, "does-not-exist"), join(d, "dangling"));
-  symlinkSync(d, join(d, "self-link")); // points back at the workspace root
-  symlinkSync(join(outside, "repoC/src/a.py"), join(d, "file-link")); // a file, not a repo
+  const dirLink = process.platform === "win32" ? "junction" : "dir"; // junctions need no privilege on Windows
+  symlinkSync(join(outside, "repoC"), join(d, "repoC-link"), dirLink); // a symlink to a repo elsewhere
+  symlinkSync(join(d, "does-not-exist"), join(d, "dangling"), dirLink);
+  symlinkSync(d, join(d, "self-link"), dirLink); // points back at the workspace root
+  try {
+    symlinkSync(join(outside, "repoC/src/a.py"), join(d, "file-link")); // a file, not a repo
+  } catch (err) {
+    t.diagnostic(`skipping the file-link case: ${err instanceof Error ? err.message : err}`);
+  }
   assert.deepEqual(discoverWorkspaceChildren(d).sort(), ["repoA", "repoC-link"]);
   rmSync(d, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });

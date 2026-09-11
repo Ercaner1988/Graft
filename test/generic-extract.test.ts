@@ -463,10 +463,11 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
     assert.ok(g, "graph built");
     assert.ok(!g!.nodes.some((n) => n.path === "lib.rs"), "failed file has no file node");
 
-    // The extract cache must remember the failure, not an empty success: an
-    // incremental rebuild of the unchanged file replays the error.
+    // The failure must not turn into an empty success. Since #312 a cached
+    // error is re-parsed rather than replayed (it may have belonged to the run,
+    // not the bytes) — this grammar still throws, so the error comes back.
     const second = await buildGraph(dir, { reuse: true });
-    assert.equal(second.parsed, 0, "unchanged file is not re-parsed");
+    assert.equal(second.parsed, 1, "a cached failure is re-parsed, not replayed (#312)");
     assert.equal(second.errors.length, 1, `error replayed (got: ${second.errors.join("; ")})`);
     assert.match(second.errors[0], /rust grammar threw/);
   } finally {
@@ -474,75 +475,6 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
   }
 });
 
-// #198: Zig is registered in GENERIC_LANGS but had no tags.scm, so the walker
-// minted `const Point = struct` as a variable and emitted no call edges.
-const ZIG = `const Point = struct {
-    x: i32,
-};
-
-fn helper(n: i32) i32 {
-    return n;
-}
-
-pub fn run(n: i32) i32 {
-    return helper(n);
-}
-
-test "calls helper" {
-    _ = helper(1);
-}
-
-test {
-    _ = helper(2);
-}
-`;
-
-test("genericLangOf routes .zig to the breadth tier", () => {
-  assert.equal(genericLangOf("src/main.zig")?.name, "zig");
-});
-
-test("Zig fn/const struct/named test become symbols; call edges resolve; unnamed tests stay out (#198)", async () => {
-  await warmGenericGrammars(["zig"]);
-  assert.ok(isWarm("zig"), "zig grammar should warm");
-  const { nodes, rawEdges } = extractGeneric("src/main.zig", ZIG, "zig");
-  const symbols = nodes.filter((n) => n.kind !== "file");
-  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
-  assert.deepEqual(kinds, ["function:calls helper", "function:helper", "function:run", "struct:Point"]);
-// #198: OCaml is registered in GENERIC_LANGS but had no tags.scm, so the walker
-// minted `let helper x = …` as kind `variable` (`value_definition` matches
-// `(^|_)(val|…)`) and emitted no call edges.
-const OCAML = `let helper x = 1
-
-let rec go x = helper x
-
-let n = 1
-
-module M = struct
-  let wrap x = go x
-end
-
-type t = { n : int }
-`;
-
-test("genericLangOf routes .ml/.mli to the breadth tier", () => {
-  assert.equal(genericLangOf("lib/example.ml")?.name, "ocaml");
-  assert.equal(genericLangOf("lib/example.mli")?.name, "ocaml");
-});
-
-test("OCaml let/let rec/module/type become symbols; call edges resolve; bare lets stay out (#198)", async () => {
-  await warmGenericGrammars(["ocaml"]);
-  assert.ok(isWarm("ocaml"), "ocaml grammar should warm");
-  const { nodes, rawEdges } = extractGeneric("lib/example.ml", OCAML, "ocaml");
-  const symbols = nodes.filter((n) => n.kind !== "file");
-  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
-  assert.deepEqual(kinds, ["function:go", "function:helper", "function:wrap", "module:M", "type:t"]);
-
-  const edges = resolveEdges(nodes, rawEdges);
-  const calls = edges
-    .filter((e) => e.relation === "calls")
-    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
-  assert.ok(calls.includes("run→helper"), `run → helper (got ${calls.join(", ")})`);
-  assert.ok(calls.includes("calls helper→helper"), `named test → helper (got ${calls.join(", ")})`);
 // #150: HTML templates enter the graph as file nodes so they are findable by
 // name (Django `template_name` without walking View → template). No tags.scm —
 // the walker finds no definition-shaped HTML nodes, which is the point.
@@ -609,6 +541,84 @@ test("HTML templates are findable by name after build — grep content, ask/reso
 
   const chk = await checkGraph(dir);
   assert.equal(chk.ok, true, `check OK on an html+py repo (added=${chk.added}, removed=${chk.removed})`);
+});
+
+// #198: OCaml is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// minted `let helper x = …` as kind `variable` (`value_definition` matches
+// `(^|_)(val|…)`) and emitted no call edges.
+const OCAML = `let helper x = 1
+
+let rec go x = helper x
+
+let n = 1
+
+module M = struct
+  let wrap x = go x
+end
+
+type t = { n : int }
+`;
+
+test("genericLangOf routes .ml/.mli to the breadth tier", () => {
+  assert.equal(genericLangOf("lib/example.ml")?.name, "ocaml");
+  assert.equal(genericLangOf("lib/example.mli")?.name, "ocaml");
+});
+
+test("OCaml let/let rec/module/type become symbols; call edges resolve; bare lets stay out (#198)", async () => {
+  await warmGenericGrammars(["ocaml"]);
+  assert.ok(isWarm("ocaml"), "ocaml grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("lib/example.ml", OCAML, "ocaml");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
+  assert.deepEqual(kinds, ["function:go", "function:helper", "function:wrap", "module:M", "type:t"]);
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
   assert.ok(calls.includes("go→helper"), `go → helper (got ${calls.join(", ")})`);
   assert.ok(calls.includes("wrap→go"), `M.wrap → go (got ${calls.join(", ")})`);
+});
+
+// #198: Zig is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// minted `const Point = struct` as a variable and emitted no call edges.
+const ZIG = `const Point = struct {
+    x: i32,
+};
+
+fn helper(n: i32) i32 {
+    return n;
+}
+
+pub fn run(n: i32) i32 {
+    return helper(n);
+}
+
+test "calls helper" {
+    _ = helper(1);
+}
+
+test {
+    _ = helper(2);
+}
+`;
+
+test("genericLangOf routes .zig to the breadth tier", () => {
+  assert.equal(genericLangOf("src/main.zig")?.name, "zig");
+});
+
+test("Zig fn/const struct/named test become symbols; call edges resolve; unnamed tests stay out (#198)", async () => {
+  await warmGenericGrammars(["zig"]);
+  assert.ok(isWarm("zig"), "zig grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("src/main.zig", ZIG, "zig");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
+  assert.deepEqual(kinds, ["function:calls helper", "function:helper", "function:run", "struct:Point"]);
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("run→helper"), `run → helper (got ${calls.join(", ")})`);
+  assert.ok(calls.includes("calls helper→helper"), `named test → helper (got ${calls.join(", ")})`);
 });

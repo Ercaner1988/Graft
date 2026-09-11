@@ -250,7 +250,6 @@ export async function buildGraph(
       entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [] };
       return;
     }
-
     const hash = contentHash(source);
     // A cached `error` is not a parse result, it is the absence of one — and the
     // absence need not be the file's fault. A wasm grammar that aborts because the
@@ -362,7 +361,7 @@ export async function buildGraph(
   // this sidecar exists), so the nodes on disk no longer carry it — only this
   // in-memory object, still holding what `extractFile` populated, does.
   try {
-    writeAskIndex(outDir, graph);
+    writeAskIndex(outDir, graph, sources);
   } catch (err) {
     errors.push(`ask-index: ${err instanceof Error ? err.message : String(err)}`);
   }

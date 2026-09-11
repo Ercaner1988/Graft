@@ -55,6 +55,8 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "c_sharp", exts: [".cs"], wasm: "c_sharp" },
   // These ship a tags.scm (calls + symbols); ocaml has none and uses the
   // node-kind walker fallback (symbols only) — still one row, zero query.
+  // These ship a tags.scm (calls + symbols); ocaml/zig/html have none and use
+  // the node-kind walker fallback (symbols only) — still one row, zero query.
   { name: "scala", exts: [".scala", ".sc"], wasm: "scala" },
   { name: "elixir", exts: [".ex", ".exs"], wasm: "elixir" },
   { name: "solidity", exts: [".sol"], wasm: "solidity" },
@@ -68,6 +70,9 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   // grammar loads. queries/kotlin.scm is the one this language used before it was
   // promoted, and has been sitting unused since.
   { name: "kotlin", exts: [".kt", ".kts"], wasm: "kotlin" },
+  // HTML's grammar has no definition-shaped nodes, so the walker yields a file
+  // node only — enough for Django/etc. templates to be findable by name (#150).
+  { name: "html", exts: [".html", ".htm"], wasm: "html" },
 ];
 
 const byExt = new Map<string, GenericLang>();

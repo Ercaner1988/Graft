@@ -24,7 +24,9 @@ import { buildGraph } from "../src/graph/build.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { checkGraph } from "../src/graph/check.js";
 import { contextDirFor } from "../src/context/node-file.js";
-import { skeleton } from "../src/ask/ask.js";
+import { ask, skeleton } from "../src/ask/ask.js";
+import { grepGraph } from "../src/search/grep.js";
+import { resolveSymbol } from "../src/graph/traverse.js";
 
 const RUST = `pub struct Config {
     name: String,
@@ -348,6 +350,53 @@ test("Dart file-level skeleton lists the API, not function-body locals (#134)", 
   );
 });
 
+// #293 remainder: .glsl is in tree-sitter-wasm; no tags.scm, so the walker
+// fallback must still mint struct/function symbols so skeleton is not empty.
+// .gd is #299 — do not register gdscript here.
+const GLSL = `struct Probe {
+  vec3 origin;
+  float radius;
+};
+
+float march(vec3 p) {
+  return length(p);
+}
+
+void main() {
+  float d = march(vec3(0.0));
+}
+`;
+
+test("genericLangOf routes .glsl to the breadth tier (#293)", () => {
+  assert.equal(genericLangOf("shaders/cell.glsl")?.name, "glsl");
+});
+
+test("GLSL struct and functions become symbols without a tags query (#293)", async () => {
+  await warmGenericGrammars(["glsl"]);
+  assert.ok(isWarm("glsl"), "glsl grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("shaders/cell.glsl", GLSL, "glsl");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const byName = new Map(symbols.map((n) => [n.name, n]));
+
+  assert.equal(byName.get("Probe")?.kind, "struct", "Probe is a struct");
+  assert.equal(byName.get("march")?.kind, "function", "march is a function");
+  assert.equal(byName.get("main")?.kind, "function", "main is a function");
+  assert.equal(rawEdges.length, 0, "no tags.scm → symbols only, no call edges");
+});
+
+test("GLSL file-level skeleton lists the shader API (#293)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-glsl-"));
+  mkdirSync(join(dir, "shaders"));
+  writeFileSync(join(dir, "shaders", "cell.glsl"), GLSL);
+
+  await buildGraph(dir, { reuse: false });
+  const r = skeleton(dir, "shaders/cell.glsl");
+  const names = r.entries.map((e) => e.name);
+  for (const want of ["Probe", "march", "main"]) {
+    assert.ok(names.includes(want), `skeleton includes ${want} (got ${names.join(", ")})`);
+  }
+});
+
 // #139: tree-sitter-wasm 1.1.4's PHP grammar throws `memory access out of bounds`
 // on heredoc/nowdoc, and extractGeneric swallows that into a file-only result.
 // PHP is depth-tier now (.php is not claimed by the breadth registry), so this
@@ -461,13 +510,162 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
     assert.ok(g, "graph built");
     assert.ok(!g!.nodes.some((n) => n.path === "lib.rs"), "failed file has no file node");
 
-    // The extract cache must remember the failure, not an empty success: an
-    // incremental rebuild of the unchanged file replays the error.
+    // The failure must not turn into an empty success. Since #312 a cached
+    // error is re-parsed rather than replayed (it may have belonged to the run,
+    // not the bytes) — this grammar still throws, so the error comes back.
     const second = await buildGraph(dir, { reuse: true });
-    assert.equal(second.parsed, 0, "unchanged file is not re-parsed");
+    assert.equal(second.parsed, 1, "a cached failure is re-parsed, not replayed (#312)");
     assert.equal(second.errors.length, 1, `error replayed (got: ${second.errors.join("; ")})`);
     assert.match(second.errors[0], /rust grammar threw/);
   } finally {
     swapGrammarForTest("rust", prev);
   }
+});
+
+// #150: HTML templates enter the graph as file nodes so they are findable by
+// name (Django `template_name` without walking View → template). No tags.scm —
+// the walker finds no definition-shaped HTML nodes, which is the point.
+const HTML = `<!DOCTYPE html>
+<html>
+<head><title>Shop home</title></head>
+<body>
+  <h1 id="hero">Shop home</h1>
+  {% block content %}welcome-to-the-shop{% endblock %}
+</body>
+</html>
+`;
+
+test("genericLangOf routes .html and .htm to the breadth tier", () => {
+  assert.equal(genericLangOf("templates/index.html")?.name, "html");
+  assert.equal(genericLangOf("legacy/home.HTM")?.name, "html");
+});
+
+test("HTML extract is a file node only — no walker-invented symbols (#150)", async () => {
+  await warmGenericGrammars(["html"]);
+  assert.ok(isWarm("html"), "html grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("templates/index.html", HTML, "html");
+  assert.equal(nodes.length, 1, `file node only (got ${nodes.map((n) => n.kind + ":" + n.name).join(", ")})`);
+  assert.equal(nodes[0].kind, "file");
+  assert.equal(nodes[0].id, "templates/index.html");
+  assert.equal(nodes[0].name, "index.html");
+  assert.equal(nodes[0].origin, "generic");
+  assert.equal(rawEdges.length, 0);
+});
+
+test("HTML templates are findable by name after build — grep content, ask/resolveSymbol filename (#150)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-html-"));
+  mkdirSync(join(dir, "templates"));
+  writeFileSync(join(dir, "templates", "index.html"), HTML);
+  writeFileSync(
+    join(dir, "views.py"),
+    "from django.views.generic import TemplateView\n\nclass Home(TemplateView):\n    template_name = \"index.html\"\n",
+  );
+
+  await buildGraph(dir, { reuse: false });
+  const g = readGraph(wiringPath(contextDirFor(dir)));
+  assert.ok(g, "graph built");
+  const file = g!.nodes.find((n) => n.path === "templates/index.html" && n.kind === "file");
+  assert.ok(file, "html file node is in the graph");
+  assert.equal(file!.name, "index.html");
+
+  const grep = grepGraph(g!, dir, "welcome-to-the-shop");
+  assert.ok(
+    grep.groups.some((gr) => gr.path === "templates/index.html"),
+    `grep hits the template (got ${grep.groups.map((gr) => gr.path).join(", ")})`,
+  );
+
+  const byName = resolveSymbol(g!, "index.html");
+  assert.ok(
+    byName.some((n) => n.kind === "file" && n.path === "templates/index.html"),
+    `resolveSymbol("index.html") finds the template (got ${byName.map((n) => n.id).join(", ")})`,
+  );
+
+  const asked = ask(dir, "index.html");
+  assert.ok(
+    asked.hits.some((h) => h.pointer === "templates/index.html" || h.pointer.startsWith("templates/index.html:")),
+    `ask("index.html") hits the template (got ${asked.hits.map((h) => h.pointer).join(", ")})`,
+  );
+
+  const chk = await checkGraph(dir);
+  assert.equal(chk.ok, true, `check OK on an html+py repo (added=${chk.added}, removed=${chk.removed})`);
+});
+
+// #198: OCaml is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// minted `let helper x = …` as kind `variable` (`value_definition` matches
+// `(^|_)(val|…)`) and emitted no call edges.
+const OCAML = `let helper x = 1
+
+let rec go x = helper x
+
+let n = 1
+
+module M = struct
+  let wrap x = go x
+end
+
+type t = { n : int }
+`;
+
+test("genericLangOf routes .ml/.mli to the breadth tier", () => {
+  assert.equal(genericLangOf("lib/example.ml")?.name, "ocaml");
+  assert.equal(genericLangOf("lib/example.mli")?.name, "ocaml");
+});
+
+test("OCaml let/let rec/module/type become symbols; call edges resolve; bare lets stay out (#198)", async () => {
+  await warmGenericGrammars(["ocaml"]);
+  assert.ok(isWarm("ocaml"), "ocaml grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("lib/example.ml", OCAML, "ocaml");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
+  assert.deepEqual(kinds, ["function:go", "function:helper", "function:wrap", "module:M", "type:t"]);
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("go→helper"), `go → helper (got ${calls.join(", ")})`);
+  assert.ok(calls.includes("wrap→go"), `M.wrap → go (got ${calls.join(", ")})`);
+});
+
+// #198: Zig is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// minted `const Point = struct` as a variable and emitted no call edges.
+const ZIG = `const Point = struct {
+    x: i32,
+};
+
+fn helper(n: i32) i32 {
+    return n;
+}
+
+pub fn run(n: i32) i32 {
+    return helper(n);
+}
+
+test "calls helper" {
+    _ = helper(1);
+}
+
+test {
+    _ = helper(2);
+}
+`;
+
+test("genericLangOf routes .zig to the breadth tier", () => {
+  assert.equal(genericLangOf("src/main.zig")?.name, "zig");
+});
+
+test("Zig fn/const struct/named test become symbols; call edges resolve; unnamed tests stay out (#198)", async () => {
+  await warmGenericGrammars(["zig"]);
+  assert.ok(isWarm("zig"), "zig grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("src/main.zig", ZIG, "zig");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
+  assert.deepEqual(kinds, ["function:calls helper", "function:helper", "function:run", "struct:Point"]);
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("run→helper"), `run → helper (got ${calls.join(", ")})`);
+  assert.ok(calls.includes("calls helper→helper"), `named test → helper (got ${calls.join(", ")})`);
 });

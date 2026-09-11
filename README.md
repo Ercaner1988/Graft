@@ -211,7 +211,9 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
-  OCaml, Zig, Dart, Clojure, Nix, Lua**.
+  OCaml, Zig, Dart, Clojure, Nix, Lua, HTML, GLSL**.
+  **Bash** (`.sh`, `.bash`) also uses this tier for function symbols;
+  Bash call edges and extensionless shell scripts are not yet supported.
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a
@@ -219,8 +221,9 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort — with no server installed the graph is unchanged.
 
-Twenty-three languages in total. A file whose language isn't listed is skipped, not
-indexed. Adding a broad-tier language is a small contribution — see
+Twenty-four languages in total. HTML is indexed as a file node (no HTML-structure
+extraction), so templates are findable by name. A file whose language isn't listed
+is skipped, not indexed. Adding a broad-tier language is a small contribution — see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
 ---
@@ -283,6 +286,7 @@ With no TTY to prompt on — CI, a Dockerfile, a piped shell — `init` writes *
 | `--no-hooks` | skip hook installation |
 | `--no-statusline` | skip writing Claude Code `statusLine` (same as `GRAFT_NO_STATUSLINE=1`) |
 | `--no-global` | skip writes outside this repo (the `~/.codex/` entries below) |
+| `--runner <npx\|bunx\|pnpm\|yarn>` | package runner written into generated MCP configs. Default: detect from the lockfile (`bun.lock`/`bun.lockb` → `bunx`, `pnpm-lock.yaml` → `pnpm dlx`, `yarn.lock` → `yarn dlx`, otherwise `npx -y`) |
 
 #### Writes outside the repo
 
@@ -298,7 +302,7 @@ Both configs are user-level, so they apply to **every** repo you open with Codex
 
 ### MCP server
 
-`graft init` also registers Graft's MCP server with agents that support it, so these six tools appear natively, no shell required. Claude Code gets this too: `graft init` writes the server into the project's `.mcp.json` (restart Claude Code to load it). Skip with `--no-mcp`; run it manually with `graft mcp [dir]`.
+`graft init` also registers Graft's MCP server with agents that support it, so these six tools appear natively, no shell required. Claude Code gets this too: `graft init` writes the server into the project's `.mcp.json` (restart Claude Code to load it). The launch command is the repo's package runner — `bunx` / `pnpm dlx` / `yarn dlx` / `npx -y` — so a Bun-only machine does not inherit a hardcoded `npx`. Override with `--runner`. Skip with `--no-mcp`; run it manually with `graft mcp [dir]`.
 
 | Tool | Takes | What it's for |
 |---|---|---|
@@ -394,6 +398,7 @@ graft init --agents cursor kiro      # wire only these agents, no prompt (ids: a
 graft init --yes                     # no prompt; wire every detected agent
 graft init --no-global               # skip writes outside this repo (~/.codex/ config + hooks)
 graft init --no-statusline           # skip Claude Code statusLine (same as GRAFT_NO_STATUSLINE=1)
+graft init --runner bunx             # write bunx into generated MCP configs (also: npx, pnpm, yarn)
 graft init --no-build                # wire the files only; don't build the graph
 graft init --all-agents              # wire every known agent, detected or not
 graft init --list-agents             # list known agent ids and exit
@@ -417,6 +422,14 @@ Method calls resolve through the receiver's type — constructor assignments
 (`self.router = APIRouter()`) and type annotations, not just the call-site
 name — so `callers`/`grep --in` return calls bound to the right
 type on method-heavy code, not every method anywhere with that name.
+
+`callers` and MCP `graft_trace_calls` label each hit with its edge confidence:
+`lsp_resolved`, `lsp_dispatch`, `extracted`, or `inferred` (strongest first).
+For a transitive walk, `[extracted; path inferred]` means the final edge was
+extracted but an earlier hop was inferred. `callers --json` exposes both
+`confidence` and `pathConfidence`; the latter is the weakest edge on the first
+BFS path that reached the hit, not a score over every possible path. Direct
+hits have the same value in both fields.
 
 ## Search & orient (`graft grep` / `graft map`)
 

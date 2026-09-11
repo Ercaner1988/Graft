@@ -194,7 +194,15 @@ export async function buildGraph(
   // needs ONCE here (buildGraph is async) before the synchronous parse loop below
   // can call extractGeneric. Depth-tier (native) grammars need no warmup.
   await warmGenericGrammars(
-    new Set(files.map((f) => genericLangOf(f.abs)?.name).filter((n): n is string => !!n)),
+    // Tier precedence, same as the parse loop below: the breadth tier is reached
+    // only for files no depth grammar claims, so a fallback row (`.java`, `.kt`)
+    // must not warm a WASM grammar this build will never call.
+    new Set(
+      files
+        .filter((f) => !languageOf(f.abs))
+        .map((f) => genericLangOf(f.abs)?.name)
+        .filter((n): n is string => !!n),
+    ),
   );
   // Container tier (.vue and friends) loads its wrapper grammars the same way,
   // for the same reason: extractContainer runs inside the sync loop below.
@@ -242,16 +250,20 @@ export async function buildGraph(
       entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [] };
       return;
     }
-
     const hash = contentHash(source);
-    if (cached && hash === cached.hash) {
+    // A cached `error` is not a parse result, it is the absence of one — and the
+    // absence need not be the file's fault. A wasm grammar that aborts because the
+    // run before it exhausted the heap fails whichever file happened to be in
+    // flight, so that error belongs to the *run*, not to the bytes this entry is
+    // keyed on. Replaying it pins the accident to the content hash: an untouched
+    // file stays broken on every later build, and a whole language can vanish from
+    // a graph that still exits 0 (#312). So an entry carrying an error falls
+    // through and is re-parsed — it produced no nodes, which is exactly what makes
+    // re-parsing it affordable, and a run that now succeeds repairs the entry.
+    if (cached && hash === cached.hash && !cached.error) {
       entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
       sources.set(rel, source);
       reused++;
-      if (cached.error) {
-        errors.push(cached.error); // this file failed to parse last time too
-        return;
-      }
       nodes.push(...cached.nodes);
       rawEdges.push(...cached.rawEdges);
       langs.add(label);
@@ -349,7 +361,7 @@ export async function buildGraph(
   // this sidecar exists), so the nodes on disk no longer carry it — only this
   // in-memory object, still holding what `extractFile` populated, does.
   try {
-    writeAskIndex(outDir, graph);
+    writeAskIndex(outDir, graph, sources);
   } catch (err) {
     errors.push(`ask-index: ${err instanceof Error ? err.message : String(err)}`);
   }

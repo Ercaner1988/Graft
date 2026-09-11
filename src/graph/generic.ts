@@ -39,7 +39,13 @@ export interface GenericLang {
 }
 
 /** The breadth registry. Add a row + a queries/<name>.scm to support a language.
- * Extensions here must NOT collide with the depth tier's EXTENSIONS (extract.ts). */
+ *
+ * An extension the depth tier also claims (extract.ts) is a FALLBACK row, not a
+ * collision: the depth tier is asked first everywhere, so such a row is reached
+ * only when that language's native grammar did not load. `.java` has always been
+ * one. `.kt`/`.kts` are one as of #323, where tree-sitter-kotlin ships no
+ * prebuilds and cannot compile without a C toolchain — with the row, that machine
+ * indexes Kotlin signatures instead of no Kotlin at all. */
 export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "rust", exts: [".rs"], wasm: "rust" },
   { name: "java", exts: [".java"], wasm: "java" },
@@ -47,8 +53,11 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "cpp", exts: [".cpp", ".cc", ".cxx", ".hpp", ".hh"], wasm: "cpp" },
   { name: "ruby", exts: [".rb"], wasm: "ruby" },
   { name: "c_sharp", exts: [".cs"], wasm: "c_sharp" },
-  // These ship a tags.scm (calls + symbols); ocaml/zig have none and use the
+  // These ship a tags.scm (calls + symbols); ocaml has none and uses the
+  // These ship a tags.scm (calls + symbols); zig has none and uses the
   // node-kind walker fallback (symbols only) — still one row, zero query.
+  // These ship a tags.scm (calls + symbols); ocaml/zig/html have none and use
+  // the node-kind walker fallback (symbols only) — still one row, zero query.
   { name: "scala", exts: [".scala", ".sc"], wasm: "scala" },
   { name: "elixir", exts: [".ex", ".exs"], wasm: "elixir" },
   { name: "solidity", exts: [".sol"], wasm: "solidity" },
@@ -58,6 +67,15 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "clojure", exts: [".clj", ".cljs", ".cljc", ".bb"], wasm: "clojure" },
   { name: "nix", exts: [".nix"], wasm: "nix" },
   { name: "lua", exts: [".lua"], wasm: "lua" },
+  // Fallback for the depth tier (see above), unreachable while the native Kotlin
+  // grammar loads. queries/kotlin.scm is the one this language used before it was
+  // promoted, and has been sitting unused since.
+  { name: "kotlin", exts: [".kt", ".kts"], wasm: "kotlin" },
+  // HTML's grammar has no definition-shaped nodes, so the walker yields a file
+  // node only — enough for Django/etc. templates to be findable by name (#150).
+  { name: "html", exts: [".html", ".htm"], wasm: "html" },
+  { name: "bash", exts: [".sh", ".bash"], wasm: "bash" },
+  { name: "glsl", exts: [".glsl"], wasm: "glsl" }, // #293; gdscript is #299
 ];
 
 const byExt = new Map<string, GenericLang>();

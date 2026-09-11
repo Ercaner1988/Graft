@@ -22,6 +22,7 @@ import { rulesForPointers } from "./brain/attach.js";
 import { clearLink, type BrainLink } from "./brain/link.js";
 import { buildLocalDigest, fetchExpectedRepo, pushDigest, repoSlugFromGit, sameRepo } from "./brain/push.js";
 import { readLink } from "./brain/link.js";
+import { isPackageRunner, type PackageRunner } from "./hosts/mcp-config.js";
 import { contextDirFor } from "./context/node-file.js";
 import { loadGraphCached } from "./graph/load.js";
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refresh.js";
@@ -44,6 +45,7 @@ import { formatNonInteractiveHelp, formatPlan, runPicker } from "./cli-picker.js
 import { homedir } from "node:os";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, runUpgrade } from "./cli-meta.js";
 import { patchBuildConfig, type BuildConfig } from "./util/state.js";
+import { NEVER_INCLUDE_DIRS } from "./ingest/fs.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { setInputRate } from "./context/savings.js";
@@ -350,8 +352,9 @@ program
   )
   .option(
     "--include-dir <name>",
-    "override SKIP_DIRS for this repo's walks — repeatable (e.g. --include-dir build --include-dir tools); " +
-      "persisted, so a later build (and the hooks/refresh path) include it without the flag; dot-dirs are never overridable",
+    "override SKIP_DIRS (and named hidden directories) for this repo's walks — repeatable " +
+      "(e.g. --include-dir build --include-dir .kb); persisted, so a later build (and the " +
+      "hooks/refresh path) include it without the flag; .git is never overridable",
     (val: string, prev: string[]) => [...prev, val],
     [] as string[],
   )
@@ -397,14 +400,13 @@ program
     // walkDir call sites read it from state, not from a threaded option.
     const buildConfigPatch: BuildConfig = {};
     if (opts.includeDir && opts.includeDir.length > 0) {
-      // --include-dir takes bare SKIP_DIRS-style directory NAMES (shouldSkipDir
-      // compares a single path segment), never paths, and dot-dirs are never
-      // overridable at all (see the option's own help text) — reject anything
-      // else up front instead of silently persisting a value that can never
-      // match a real directory name.
+      // --include-dir takes bare directory NAMES (shouldSkipDir compares a
+      // single path segment), never paths. Named hidden directories (.kb) are
+      // the same opt-in as SKIP_DIRS names; NEVER_INCLUDE_DIRS (.git) stay
+      // forbidden — reject those up front instead of persisting a no-op.
       for (const name of opts.includeDir) {
-        if (name.startsWith(".")) {
-          console.error(`✗ --include-dir "${name}": dot-directories are never overridable`);
+        if (NEVER_INCLUDE_DIRS.has(name)) {
+          console.error(`✗ --include-dir "${name}": ${name} is never overridable`);
           process.exit(1);
         }
         if (name.includes("/") || name.includes("\\")) {
@@ -947,7 +949,8 @@ program
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
   .option("--brain <handoff>", "attach a Trail brain: <brainId>:<token> (or a bare brain id with GRAFT_BRAIN_TOKEN set)")
-  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; brain?: string }) => {
+  .option("--runner <npx|bunx|pnpm|yarn>", "package runner written into generated MCP configs (default: detect from the lockfile)")
+  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; brain?: string; runner?: string }) => {
     if (opts.listAgents) {
       for (const id of [...hostIds(), "claude"]) console.log(id);
       return;
@@ -964,6 +967,11 @@ program
       }
       brainLink = parsed;
     }
+    if (opts.runner !== undefined && !isPackageRunner(opts.runner)) {
+      console.error(`✗ unknown --runner ${opts.runner} — valid: npx, bunx, pnpm, yarn`);
+      process.exit(1);
+    }
+    const runner: PackageRunner | undefined = opts.runner !== undefined && isPackageRunner(opts.runner) ? opts.runner : undefined;
     const repo = resolve(dir);
     const explicit = Array.isArray(opts.agents) ? opts.agents : undefined;
 
@@ -981,7 +989,7 @@ program
     // guessing (pre-0.8 this silently wired every agent the machine had ever
     // installed — see --yes to get that back).
     const home = homedir();
-    const plan = planInit(repo, { home });
+    const plan = planInit(repo, { home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global });
     const detectedIds = plan.filter((p) => p.detected).map((p) => p.id);
     const noAgents = (opts as { agents?: unknown }).agents === false;
 
@@ -1031,7 +1039,7 @@ program
     if (opts.dryRun) {
       console.error(formatPlan(plan, ids, repo, home));
       for (const child of children)
-        console.error(`\n— ${child}/ (workspace child)\n` + formatPlan(planInit(join(repo, child), { home }), ids, join(repo, child), home));
+        console.error(`\n— ${child}/ (workspace child)\n` + formatPlan(planInit(join(repo, child), { home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global }), ids, join(repo, child), home));
       return;
     }
     if (ids.length === 0) {
@@ -1047,7 +1055,7 @@ program
 
     for (const target of targets) {
       if (target !== repo) console.error(`\n— ${relative(repo, target)}/`);
-      wireTarget(target, ids, { home, cliPath, plan, opts, wantClaude });
+      wireTarget(target, ids, { home, cliPath, plan, opts: { ...opts, runner }, wantClaude });
     }
 
     // The brain comes last, after the graph exists: its rules are anchored to
@@ -1093,7 +1101,7 @@ function wireTarget(
     cliPath: string;
     plan: ReturnType<typeof planInit>;
     wantClaude: boolean;
-    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean; statusline?: boolean };
+    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean; statusline?: boolean; runner?: PackageRunner };
   },
 ): void {
     const { home, cliPath, plan, wantClaude, opts } = ctx;
@@ -1114,7 +1122,7 @@ function wireTarget(
       // `global`/`home` are threaded through alongside `statusline`: the claude layer
       // writes under `~/.claude` now (hosts/claude-global.ts), so --no-global has to
       // reach it or the flag would silently mean "no out-of-repo writes, except three".
-      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home });
+      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home, runner: opts.runner });
       console.error(`✓ wrote ${res.settingsPath}`);
       for (const s of res.shims) console.error(`✓ wrote ${s}`);
       console.error(`✓ wrote ${res.skill}`);
@@ -1139,12 +1147,18 @@ function wireTarget(
         mcp: opts.mcp,
         hooks: opts.hooks,
         global: opts.global,
+        runner: opts.runner,
       });
       for (const w of r.written) console.error(`✓ ${w.id}: ${w.path} (${w.action})`);
       for (const m of r.mcp) console.error(`✓ mcp ${m.id}: ${m.path} (${m.action})`);
       for (const h of r.hooks) console.error(`✓ hook ${h.id}: ${h.path} (${h.action})`);
       // Only worth saying when there was actually something out-of-repo to skip.
-      if (opts.global === false && selectedWrites(plan, ids).some((w) => w.scope === "global"))
+      // `plan` already reflects --no-global, so ask the unsuppressed plan whether
+      // there was anything out-of-repo to skip.
+      if (
+        opts.global === false &&
+        selectedWrites(planInit(repo, { home, mcp: opts.mcp, hooks: opts.hooks }), ids).some((w) => w.scope === "global")
+      )
         console.error("· skipped out-of-repo writes (--no-global)");
     }
 
@@ -1158,6 +1172,7 @@ function wireTarget(
       mcp: opts.mcp !== false,
       hooks: opts.hooks !== false,
       statusline: wantStatusline,
+      ...(opts.runner ? { runner: opts.runner } : {}),
     });
 
     // Every host's wiring points at graft/, so the graph is built whatever was

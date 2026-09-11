@@ -7,20 +7,80 @@
  * resolved against the whole-repo node index later, in build.ts.
  */
 import Parser from "tree-sitter";
-import TypeScript from "tree-sitter-typescript";
-import Python from "tree-sitter-python";
-import Go from "tree-sitter-go";
-import R from "tree-sitter-r";
-import Java from "tree-sitter-java";
-import Kotlin from "tree-sitter-kotlin";
-import Swift from "tree-sitter-swift";
-import PHP from "tree-sitter-php";
+import { createRequire } from "node:module";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
 export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "swift" | "php" | "r";
+
+const require = createRequire(import.meta.url);
+
+/** Where each depth-tier grammar comes from. `pick` is for the modules that
+ * export more than one. */
+const GRAMMAR_MODULES: Record<Language, { pkg: string; pick?: (m: Record<string, unknown>) => unknown }> = {
+  typescript: { pkg: "tree-sitter-typescript", pick: (m) => m.typescript },
+  tsx: { pkg: "tree-sitter-typescript", pick: (m) => m.tsx },
+  python: { pkg: "tree-sitter-python" },
+  go: { pkg: "tree-sitter-go" },
+  java: { pkg: "tree-sitter-java" },
+  kotlin: { pkg: "tree-sitter-kotlin" },
+  swift: { pkg: "tree-sitter-swift" },
+  php: { pkg: "tree-sitter-php", pick: (m) => m.php },
+  r: { pkg: "tree-sitter-r" },
+};
+
+/**
+ * These are native (node-gyp) modules, and a native module can fail to load for
+ * reasons that have nothing to do with the repository being indexed: no prebuild
+ * for the platform and no compiler to build one (#323), an install that skipped
+ * build scripts, a binding that names its artifact wrong under another runtime.
+ * Imported at the top of this module — as they were — any single one of those
+ * took the whole CLI down at load time, before argv was read: `--version`,
+ * `--help`, and `ask` on a repo containing no Kotlin, all dying with a
+ * `node-gyp-build` stack trace that never says "graft".
+ *
+ * So load them the way the two WASM tiers already load theirs: a grammar that
+ * will not load costs its own language, not the tool. The rest follows from
+ * {@link entryFor} no longer claiming that language's extensions — those files
+ * take the paths a language graft has no grammar for takes today (the breadth
+ * tier where a generic row claims the extension, otherwise unindexed), and no
+ * other language is affected.
+ */
+const GRAMMARS = {} as Record<Language, unknown>;
+const UNAVAILABLE = new Map<Language, string>(); // language → why its grammar did not load
+for (const lang of Object.keys(GRAMMAR_MODULES) as Language[]) {
+  const { pkg, pick } = GRAMMAR_MODULES[lang];
+  try {
+    const mod = require(pkg) as Record<string, unknown>;
+    const grammar = pick ? pick(mod) : mod;
+    // A module that loads but exports no grammar would otherwise fail later,
+    // inside `parser.setLanguage` — the same fault, one file at a time.
+    if (!grammar) throw new Error(`${pkg} exports no grammar`);
+    GRAMMARS[lang] = grammar;
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    UNAVAILABLE.set(lang, why.split("\n")[0]); // node-gyp-build's message is a paragraph
+  }
+}
+
+const warnedUnavailable = new Set<Language>();
+/**
+ * Said once per language, the first time a file that language would have claimed
+ * comes past: silent in a repo that has none of those files — so one broken
+ * grammar no longer makes `graft --version` noisy on a TypeScript repo — and
+ * unmissable in a repo full of them, because indexing short must never be quiet.
+ */
+function warnUnavailable(lang: Language): void {
+  if (warnedUnavailable.has(lang)) return;
+  warnedUnavailable.add(lang);
+  const exts = EXTENSIONS.filter((e) => e.grammar === lang).map((e) => e.ext).join("/");
+  console.warn(
+    `graft: ${exts} files are not parsed with their own grammar — ${GRAMMAR_MODULES[lang].pkg} failed to load ` +
+      `(${UNAVAILABLE.get(lang)}). Reinstalling graft rebuilds it; every other language indexes as usual.`,
+  );
+}
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -61,12 +121,19 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
   const p = path.toLowerCase();
-  return EXTENSIONS.find((e) => p.endsWith(e.ext));
+  const hit = EXTENSIONS.find((e) => p.endsWith(e.ext));
+  if (hit && UNAVAILABLE.has(hit.grammar)) {
+    warnUnavailable(hit.grammar);
+    return undefined; // no grammar to parse it with, so this tier does not claim it
+  }
+  return hit;
 }
 
-/** Every file extension a depth-tier (hand-written) extractor claims. */
+/** Every file extension a depth-tier (hand-written) extractor claims — minus any
+ * whose grammar did not load, so `-e` validation and `supportedExtensions()`
+ * answer for the install in front of the user rather than for the table. */
 export function depthExtensions(): string[] {
-  return EXTENSIONS.map((e) => e.ext);
+  return EXTENSIONS.filter((e) => !UNAVAILABLE.has(e.grammar)).map((e) => e.ext);
 }
 
 /** Map a file path to a supported language, or null if unsupported. */
@@ -92,7 +159,11 @@ export interface RawEdge {
   relation: Relation;
   file: string; // the file this edge originates in (scopes name resolution)
   targetId?: string; // already-resolved target (contains)
-  specifier?: string; // module path to resolve (imports / imported-symbol references)
+  /** module path to resolve (imports / imported-symbol references). On a
+   * `calls` edge (TypeScript): the callee is a named import from this module,
+   * and `name` is its EXPORTED name; resolve.ts then confines resolution to
+   * that module instead of guessing from a unique repo-wide name match (#330). */
+  specifier?: string;
   name?: string; // symbol name to resolve (extends/implements/calls)
   viaMember?: boolean; // calls: was it `obj.foo()` (→ prefer method targets)?
   /** calls with viaMember: the receiver's resolved type name (from bindings /
@@ -311,17 +382,6 @@ const FUNCTION_VALUE_TYPES = new Set([
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
 const parser = new Parser();
-const GRAMMARS: Record<Language, unknown> = {
-  typescript: TypeScript.typescript,
-  tsx: TypeScript.tsx,
-  python: Python,
-  go: Go,
-  r: R,
-  java: Java,
-  kotlin: Kotlin,
-  swift: Swift,
-  php: PHP.php,
-};
 
 export interface WalkCtx {
   rel: string;
@@ -699,6 +759,12 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   }
 
   // not a definition — capture calls/imports/references, then descend with the same context
+  if (ctx.lang === "php") {
+    const ref = phpTypeReference(node, ctx);
+    if (ref) {
+      edges.push({ source: ctx.parentId, relation: "references", ...ref, file: ctx.rel });
+    }
+  }
   // R's `call` node is also its ONLY vehicle for library()/require()/source() —
   // there's no separate import-statement grammar construct to key off, so isImport
   // must be checked before the generic calls path or every import call would be
@@ -722,12 +788,23 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       consumedCallee === "R6Class" || (consumedCallee === "list" && rIsMixinContainer(node));
     const callee = isConsumedRClassCall ? null : calleeName(node, ctx.lang);
     if (callee) {
+      // A bare TypeScript call through a named import carries where the callee
+      // comes from. `ctx.importedSymbols` already excludes bindings shadowed by
+      // a local declaration in scope, so `useRouter()` under a local
+      // `function useRouter` stays a bare name. Without this, resolve.ts's
+      // unique-name fallback bound a call to `useRouter` from "next/navigation"
+      // to an unrelated test mock of the same name (#330).
+      const imported =
+        !callee.viaMember && (ctx.lang === "typescript" || ctx.lang === "tsx")
+          ? ctx.importedSymbols.get(callee.name)
+          : undefined;
       const callEdge: RawEdge = {
         source: ctx.parentId,
         relation: "calls",
-        name: callee.name,
+        name: imported ? imported.name : callee.name,
         viaMember: callee.viaMember,
         file: ctx.rel,
+        ...(imported ? { specifier: imported.specifier } : {}),
         ...(callee.kinds ? { kinds: callee.kinds } : {}),
       };
       // Overloading languages: the call site's argument count, to pick the right
@@ -968,7 +1045,36 @@ function phpAttributeClassRef(
   const nameNode =
     attr.childForFieldName("name") ??
     attr.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
-  if (!nameNode) return null;
+  return phpClassRef(nameNode, ctx);
+}
+
+/** Only class-name positions count: a variable, member name or declaration is not a type use. */
+function phpTypeReference(node: Parser.SyntaxNode, ctx: WalkCtx): { name: string; specifier?: string } | null {
+  let nameNode: Parser.SyntaxNode | null | undefined;
+  switch (node.type) {
+    case "named_type":
+    case "object_creation_expression":
+    case "class_constant_access_expression":
+      nameNode = node.namedChildren[0];
+      break;
+    case "scoped_call_expression":
+    case "scoped_property_access_expression":
+      nameNode = node.childForFieldName("scope");
+      break;
+    case "binary_expression":
+      if (node.childForFieldName("operator")?.text === "instanceof") nameNode = node.childForFieldName("right");
+      break;
+  }
+  // This grammar also parses object and relative class keywords as named_type.
+  if (nameNode?.type === "name" && /^(object|self|parent|static)$/i.test(nameNode.text)) return null;
+  return phpClassRef(nameNode, ctx);
+}
+
+function phpClassRef(
+  nameNode: Parser.SyntaxNode | null | undefined,
+  ctx: WalkCtx,
+): { name: string; specifier?: string } | null {
+  if (!nameNode || (nameNode.type !== "name" && nameNode.type !== "qualified_name")) return null;
   if (nameNode.type === "qualified_name") {
     const fqn = nameNode.text.replace(/^\\/, "");
     return { name: fqn.replace(/^.*\\/, ""), specifier: fqn };

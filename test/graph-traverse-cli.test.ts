@@ -114,9 +114,14 @@ function ambiguousRepo(): string {
   mkdirSync(join(d, 'src'), { recursive: true });
   writeFileSync(join(d, 'src', 'a.ts'), 'export function shared(): number {\n  return 1;\n}\n');
   writeFileSync(join(d, 'src', 'b.ts'), 'export function shared(): number {\n  return 2;\n}\n');
-  // A cross-file call to the ambiguous name — resolve.ts drops it rather than
-  // guessing which `shared` it means, so NEITHER definition gets a caller edge.
-  writeFileSync(join(d, 'src', 'user.ts'), 'import { shared } from "./a.js";\nexport function use(): number {\n  return shared();\n}\n');
+  // A cross-file call to the ambiguous name through a barrel that re-exports
+  // both. The barrel defines no `shared` itself, so resolve.ts falls back to
+  // the name index, finds two candidates and drops the edge rather than
+  // guessing which `shared` it means — NEITHER definition gets a caller edge.
+  // (An import straight from "./a.js" would now resolve to a.ts's `shared`,
+  // see graph-resolve-imported-calls.test.ts.)
+  writeFileSync(join(d, 'src', 'index.ts'), 'export * from "./a.js";\nexport * from "./b.js";\n');
+  writeFileSync(join(d, 'src', 'user.ts'), 'import { shared } from "./index.js";\nexport function use(): number {\n  return shared();\n}\n');
   execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'build', d], { stdio: 'pipe' });
   return d;
 }
@@ -202,13 +207,13 @@ test('graft callers: quotes the call site, and only where it is the right line',
   assert.equal(r.status, 0);
   // `sub` calls `add` on line 5 of the fixture. The edge is a claim; this is the
   // evidence, and it saves opening the file to check.
-  assert.match(r.stdout, /calls ← sub \(src\/math\.ts:[^)]*\)\n\s+5: return add\(a, -b\);/);
+  assert.match(r.stdout, /calls ← sub \(src\/math\.ts:[^)]*\) \[extracted\]\n\s+5: return add\(a, -b\);/);
 
   // A second-hop hit references what is BETWEEN it and the symbol, not the symbol
   // itself, so quoting it would point at the wrong line.
   const deep = runCli(['callers', 'add', d, '--depth', '2']);
-  assert.match(deep.stdout, /calls ← compute \(src\/math\.ts:[^)]*\) \[depth 2\]\n/);
-  assert.ok(!/\[depth 2\]\n\s+\d+:/.test(deep.stdout), 'no quote on a second-hop hit');
+  assert.match(deep.stdout, /calls ← compute \(src\/math\.ts:[^)]*\) \[depth 2\] \[extracted\]\n/);
+  assert.ok(!/\[depth 2\] \[extracted\]\n\s+\d+:/.test(deep.stdout), 'no quote on a second-hop hit');
 
   // --json is a data contract: the quote is a text-output nicety and must stay out.
   const json = JSON.parse(runCli(['callers', 'add', d, '--json']).stdout);

@@ -233,11 +233,21 @@ export function resolveEdges(
         const targetFile = e.file.endsWith(".php")
           ? resolvePhpUse(e.specifier, phpFilesBySuffix)
           : resolveImport(e.specifier, e.file, byId);
-        if (!byId.has(targetFile)) continue; // external or unresolved module
+        if (!byId.has(targetFile)) {
+          // PHP: a `use` that does not map to an in-repo file (vendor
+          // `#[Route]`, `#[Deprecated]`, …) still keeps an inferred references
+          // edge, matching Java annotations whose `@interface` is not in the
+          // graph (#144). Other languages keep dropping — an unresolved TS
+          // import is not a type use.
+          if (e.file.endsWith(".php") && byId.get(e.source)?.origin === "ast") {
+            add(e.source, e.name, "references", "inferred");
+          }
+          continue;
+        }
         const candidates = perFileName.get(targetFile)?.get(e.name) ?? [];
         if (candidates.length === 1) add(e.source, candidates[0].id, "references", "extracted");
       } else if (e.file.endsWith(".php") && byId.get(e.source)?.origin === "ast") {
-        // PHP attribute without a `use` import (same-file or globally unique class).
+        // PHP type/attribute without a `use` import (same-file or globally unique type).
         const refKinds: Kind[] = ["class", "interface", "trait", "enum"];
         const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
@@ -250,7 +260,7 @@ export function resolveEdges(
         // contains the literal `@interface` (`includes`, not `startsWith`: a
         // meta-annotated type is `@Documented @Retention(...) public @interface
         // JsonAdapter`). Unresolved targets keep the bare name, matching
-        // heritage, rather than dropping the way PHP attributes do.
+        // heritage. PHP vendor attributes now take the same inferred path.
         const refKinds: Kind[] = ["interface"];
         const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
         const anno = hit ? byId.get(hit.id) : undefined;
@@ -317,6 +327,25 @@ export function resolveEdges(
           : e.file.endsWith(".java")
             ? ["class", "struct", "enum", "interface"]
             : ["function"]);
+      // A call through a named import (TypeScript, extract.ts) names its module.
+      // An external or unresolved module means the callee is not in this repo:
+      // drop the edge rather than let the unique-name fallback bind it to an
+      // unrelated same-named local function (a test mock, a helper named
+      // `expect`) and report it as a production dependency (#330). An in-repo
+      // module that defines the name resolves to that definition alone; one
+      // that does not (a barrel re-export) keeps the name-based fallback.
+      if (e.specifier) {
+        const targetFile = resolveImport(e.specifier, e.file, byId);
+        if (!byId.has(targetFile)) continue;
+        const inModule = (perFileName.get(targetFile)?.get(e.name!) ?? []).filter((n) =>
+          callKinds.includes(n.kind),
+        );
+        if (inModule.length === 1) {
+          add(e.source, inModule[0].id, "calls", "extracted");
+          continue;
+        }
+        if (inModule.length > 1) continue;
+      }
       let hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
       // Python is the Java case without the `new` to mark it: `Widget()` is an
       // ordinary call node, so a constructor edge dies against the function-only

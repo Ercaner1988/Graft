@@ -1,0 +1,48 @@
+name: Audit
+
+# Workflow-file linting, split from ci.yml. Ported from Soup
+# (github.com/MakazhanAlpamys/Soup, .github/workflows/ci.yml) after that repo's CI
+# caught a workflow bug no YAML parser sees: a job-level `env:` block referencing
+# the `runner` context, which is valid YAML and invalid Actions, and died before any
+# job produced a log. actionlint checks context availability, expression syntax,
+# action inputs, and shellchecks `run:` blocks — none of which `yamllint` or GitHub's
+# own schema validation cover.
+#
+# The repo-wide "a fixed idiom must not reappear" ratchets this fork carries
+# (test/ratchet-*.test.ts, e.g. #323's ban on statically importing a native grammar
+# package) run as ordinary tests inside ci.yml's `npm test` — no separate job needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installed as the pinned upstream release binary with its published SHA-256
+      # checked, NOT via `go install`: a stronger supply-chain position (the bytes
+      # that run are verified against a hash committed here), and it sidesteps
+      # `go install`'s toolchain-version resolution reaching out to the network on
+      # every run.
+      - name: Lint the workflows with actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+            --output "${RUNNER_TEMP}/actionlint.tar.gz" "$url"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/actionlint.tar.gz" | sha256sum --check --strict -
+          tar -xzf "${RUNNER_TEMP}/actionlint.tar.gz" -C "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint" -color

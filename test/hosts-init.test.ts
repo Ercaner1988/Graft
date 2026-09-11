@@ -242,6 +242,16 @@ test('CLI: --no-global stays quiet when the selection has nothing out-of-repo', 
   assert.doesNotMatch(out, /skipped out-of-repo writes/);
 });
 
+test('windsurf rule is written with always_on frontmatter (#80)', () => {
+  const home = fresh(); const repo = fresh();
+  const r = runHostsInit(repo, { home, agents: ['windsurf'] });
+  assert.deepEqual(r.written.map((w) => w.id), ['windsurf']);
+  const text = readFileSync(join(repo, '.windsurf', 'rules', 'graft.md'), 'utf8');
+  assert.match(text, /^---\ntrigger: always_on\n---\n/);
+  assert.match(text, /gitignored/);
+  assert.doesNotMatch(text, /kept in sync with the code through git/);
+});
+
 test('CLI: --dry-run respects an explicit --agents list', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.codex'), { recursive: true });
@@ -249,4 +259,23 @@ test('CLI: --dry-run respects an explicit --agents list', () => {
   assert.ok(out.includes(join('.adal', 'skills', 'graft', 'SKILL.md')), out);
   assert.doesNotMatch(out, /AGENTS\.md/);
   assert.doesNotMatch(out, /affects ALL repos/);
+});
+
+test('CLI: --runner bunx writes bunx into every generated MCP config', () => {
+  const repo = fresh();
+  const home = fresh();
+  const r = runCli(['init', repo, '--no-build', '--agents', 'cursor', 'claude', '--runner', 'bunx'], { home });
+  assert.equal(r.status, 0, r.describe());
+  const cursor = JSON.parse(readFileSync(join(repo, '.cursor', 'mcp.json'), 'utf8'));
+  assert.deepEqual(cursor.mcpServers.graft, { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+  const claude = JSON.parse(readFileSync(join(repo, '.mcp.json'), 'utf8'));
+  assert.deepEqual(claude.mcpServers.graft, { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+});
+
+test('CLI: unknown --runner exits non-zero and writes nothing', () => {
+  const repo = fresh();
+  const r = runCli(['init', repo, '--no-build', '--agents', 'cursor', '--runner', 'foo']);
+  assert.notEqual(r.status, 0, r.describe());
+  assert.match(r.stderr ?? '', /unknown --runner foo/);
+  assert.ok(!existsSync(join(repo, '.cursor', 'mcp.json')));
 });

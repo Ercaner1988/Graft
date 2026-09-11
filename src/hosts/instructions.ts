@@ -3,11 +3,20 @@
  * native format. Content changes happen HERE only; renderers just wrap it.
  */
 
+/** How to invoke graft when `graft init` has not put a binary on PATH. */
+export function cliFallbackNote(): string {
+  return `If \`graft\` is not on PATH (\`graft init\` does not install it), use \`npx -y @nanonets/graft\` in its place — e.g. \`npx -y @nanonets/graft ask "<question>" --source\`. \`bunx\`, \`pnpm dlx\`, and \`yarn dlx\` work the same way.`;
+}
+
 export function instructionBody(): string {
   return `## Graft — repo context graph
 
-This repo is indexed in \`graft/\`: small linked markdown nodes that explain each
-system and carry exact file:line spans, kept in sync with the code through git.
+\`graft/\` is a local, regenerable cache: small linked markdown nodes that explain
+each system and carry exact file:line spans. It is gitignored, so a fresh clone
+does not have it — run \`graft build\` when it is absent or stale, before
+\`graft map\`, \`graft ask\`, \`graft grep\` or \`graft callers\`.
+
+${cliFallbackNote()}
 
 For ANY task here — understanding how something works, finding where code lives,
 or scoping a change — get context from the graph before grepping or opening
@@ -63,6 +72,13 @@ ${instructionBody()}
 }
 
 export function windsurfRule(): string {
-  return `${instructionBody()}
+  // Windsurf workspace rules require YAML frontmatter with `trigger`
+  // (always_on | glob | model_decision | manual). Without it the file is
+  // inert — Cascade never applies the body. `always_on` matches the other
+  // hosts' "always apply" frontmatter.
+  return `---
+trigger: always_on
+---
+${instructionBody()}
 `;
 }

@@ -74,6 +74,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   // HTML's grammar has no definition-shaped nodes, so the walker yields a file
   // node only — enough for Django/etc. templates to be findable by name (#150).
   { name: "html", exts: [".html", ".htm"], wasm: "html" },
+  { name: "bash", exts: [".sh", ".bash"], wasm: "bash" },
 ];
 
 const byExt = new Map<string, GenericLang>();

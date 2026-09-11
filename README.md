@@ -212,6 +212,8 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
   OCaml, Zig, Dart, Clojure, Nix, Lua, HTML**.
+  **Bash** (`.sh`, `.bash`) also uses this tier for function symbols;
+  Bash call edges and extensionless shell scripts are not yet supported.
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a

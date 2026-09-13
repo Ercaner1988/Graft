@@ -46,11 +46,22 @@ fn helper() -> String {
 }
 `;
 
-test("genericLangOf routes .rs to the breadth tier (and not depth-tier extensions)", () => {
+test("genericLangOf routes .rs to the breadth tier, and has no row at all for an unclaimed extension", () => {
   assert.equal(genericLangOf("src/main.rs")?.name, "rust");
   assert.equal(genericLangOf("src/init.lua")?.name, "lua");
-  assert.equal(genericLangOf("src/app.ts"), null); // depth tier owns .ts
   assert.equal(genericLangOf("README.md"), null);
+});
+
+test("genericLangOf also has a FALLBACK row for every depth-tier language (#214) — reached only when its native grammar didn't load, never in normal routing", () => {
+  // languageOf/entryFor (extract.ts) is what actually gates depth-vs-breadth
+  // per file; this only checks that a fallback row exists to gate INTO. Java
+  // and Kotlin had one before this test did.
+  for (const [ext, name] of [
+    [".ts", "typescript"], [".tsx", "tsx"], [".py", "python"], [".go", "go"],
+    [".java", "java"], [".kt", "kotlin"], [".swift", "swift"], [".php", "php"], [".r", "r"],
+  ] as const) {
+    assert.equal(genericLangOf(`src/app${ext}`)?.name, name, `${ext} → ${name} fallback row`);
+  }
 });
 
 test("extractGeneric emits nodes + bare-name call edges for Rust (no rust-specific code)", async () => {

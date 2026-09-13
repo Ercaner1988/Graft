@@ -15,9 +15,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { once } from "node:events";
 import { tmpRepo } from "./helpers.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { contextDirFor } from "../src/context/node-file.js";
@@ -69,6 +70,49 @@ test("#323: the other languages still index, and the affected one says so once",
   assert.ok(
     g!.nodes.some((n) => n.name === "greet"),
     "TypeScript is indexed as usual — one dead grammar is not nine",
+  );
+});
+
+test("#323/#211: `graft mcp` answers initialize without touching any grammar", async () => {
+  const dir = tmpRepo("grammar-mcp-handshake");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "app.ts"), "export function greet(): string {\n  return \"hi\";\n}\n");
+
+  // Breaking tree-sitter-typescript is the sharpest version of this test: it is
+  // the grammar every real repo has, so if the initialize path went anywhere
+  // near a build (or grammar loading became eager again), this is the one most
+  // likely to trip it — and its "failed to load" warning is unmistakable if it
+  // ever fires.
+  const child = spawn(process.execPath, ["--require", PRELOAD, "--import", "tsx", "src/cli.ts", "mcp", dir], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, GRAFT_TEST_BREAK_GRAMMAR: "tree-sitter-typescript", DO_NOT_TRACK: "1" },
+  });
+  const closed = once(child, "close");
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => (stdout += d.toString()));
+  child.stderr.on("data", (d) => (stderr += d.toString()));
+  child.stdin.write(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    }) + "\n",
+  );
+
+  const deadline = Date.now() + 15_000;
+  while (!stdout.includes("\n") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  child.kill();
+  await closed.catch(() => {});
+
+  const reply = JSON.parse(stdout.split("\n")[0] || "{}");
+  assert.equal(reply.id, 1, `initialize should answer promptly, unblocked by any grammar\n${stderr}`);
+  assert.ok(reply.result?.protocolVersion, `initialize result missing\n${stdout}`);
+  assert.doesNotMatch(
+    stderr,
+    /tree-sitter-typescript failed to load/,
+    "a handshake with no build must never reach grammar loading at all",
   );
 });
 

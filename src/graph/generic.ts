@@ -45,10 +45,27 @@ export interface GenericLang {
  * only when that language's native grammar did not load. `.java` has always been
  * one. `.kt`/`.kts` are one as of #323, where tree-sitter-kotlin ships no
  * prebuilds and cannot compile without a C toolchain — with the row, that machine
- * indexes Kotlin signatures instead of no Kotlin at all. */
+ * indexes Kotlin signatures instead of no Kotlin at all.
+ *
+ * The remaining seven depth-tier rows below (typescript/tsx/python/go/swift/
+ * php/r) are the same fallback, generalized: every native (node-gyp) grammar can
+ * fail to load for reasons that have nothing to do with the repository (no
+ * prebuild for the platform, no compiler, an install that skipped a build
+ * script — see extract.ts's grammarOf doc), not just Kotlin's. tree-sitter-wasm
+ * ships a .wasm for all nine depth languages, so the safety net costs nothing to
+ * add; none of the seven has a queries/<name>.scm, so on the rare machine that
+ * actually reaches one it degrades to the node-kind walker (symbols only, no
+ * call edges) — worse than the real extractor, still far better than unindexed. */
 export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "rust", exts: [".rs"], wasm: "rust" },
   { name: "java", exts: [".java"], wasm: "java" },
+  { name: "typescript", exts: [".ts", ".mts", ".cts", ".mjs", ".cjs", ".js"], wasm: "typescript" },
+  { name: "tsx", exts: [".tsx", ".jsx"], wasm: "tsx" },
+  { name: "python", exts: [".py", ".pyi"], wasm: "python" },
+  { name: "go", exts: [".go"], wasm: "go" },
+  { name: "swift", exts: [".swift"], wasm: "swift" },
+  { name: "php", exts: [".php"], wasm: "php" },
+  { name: "r", exts: [".r"], wasm: "r" },
   { name: "c", exts: [".c", ".h"], wasm: "c" },
   { name: "cpp", exts: [".cpp", ".cc", ".cxx", ".hpp", ".hh"], wasm: "cpp" },
   { name: "ruby", exts: [".rb"], wasm: "ruby" },

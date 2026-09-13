@@ -6,7 +6,7 @@
  * arrow-function consts) plus unresolved edge intents. Edge *targets* are
  * resolved against the whole-repo node index later, in build.ts.
  */
-import Parser from "tree-sitter";
+import type Parser from "tree-sitter";
 import { createRequire } from "node:module";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
@@ -36,21 +36,38 @@ const GRAMMAR_MODULES: Record<Language, { pkg: string; pick?: (m: Record<string,
  * reasons that have nothing to do with the repository being indexed: no prebuild
  * for the platform and no compiler to build one (#323), an install that skipped
  * build scripts, a binding that names its artifact wrong under another runtime.
- * Imported at the top of this module — as they were — any single one of those
- * took the whole CLI down at load time, before argv was read: `--version`,
- * `--help`, and `ask` on a repo containing no Kotlin, all dying with a
- * `node-gyp-build` stack trace that never says "graft".
+ * Requiring one is also not free — it is a synchronous native load — and
+ * `graft mcp` has to answer the client's `initialize` before it ever looks at
+ * source. Doing all nine up front, as this module once did at import time, cost
+ * every command that path, `--version`/`--help` included: any one grammar
+ * failing took the whole CLI down before argv was read, and on `mcp` the full
+ * batch could stall past the client's handshake timeout even when every grammar
+ * loaded fine.
  *
- * So load them the way the two WASM tiers already load theirs: a grammar that
- * will not load costs its own language, not the tool. The rest follows from
- * {@link entryFor} no longer claiming that language's extensions — those files
- * take the paths a language graft has no grammar for takes today (the breadth
- * tier where a generic row claims the extension, otherwise unindexed), and no
- * other language is affected.
+ * So each grammar (and the core `tree-sitter` binding itself) is required at
+ * most once, the first time {@link entryFor} or {@link depthExtensions} is asked
+ * about that language — which for a real build is only the languages the repo's
+ * file walk actually reaches, and for `graft mcp` is none of them until a build
+ * runs. A grammar that will not load costs its own language, not the tool: the
+ * rest follows from `entryFor` no longer claiming that language's extensions —
+ * those files take the path a language graft has no grammar for takes today
+ * (the breadth tier where a generic row claims the extension, otherwise
+ * unindexed) — and no other language is affected.
  */
-const GRAMMARS = {} as Record<Language, unknown>;
+let parser: Parser | undefined;
+function treeSitter(): Parser {
+  if (!parser) parser = new (require("tree-sitter") as new () => Parser)();
+  return parser;
+}
+
+const GRAMMARS = new Map<Language, unknown>(); // language → its loaded grammar
 const UNAVAILABLE = new Map<Language, string>(); // language → why its grammar did not load
-for (const lang of Object.keys(GRAMMAR_MODULES) as Language[]) {
+
+/** Load (and cache) `lang`'s grammar, trying at most once. `undefined` means it
+ * already failed — check {@link UNAVAILABLE} for why. */
+function grammarOf(lang: Language): unknown {
+  if (GRAMMARS.has(lang)) return GRAMMARS.get(lang);
+  if (UNAVAILABLE.has(lang)) return undefined;
   const { pkg, pick } = GRAMMAR_MODULES[lang];
   try {
     const mod = require(pkg) as Record<string, unknown>;
@@ -58,10 +75,12 @@ for (const lang of Object.keys(GRAMMAR_MODULES) as Language[]) {
     // A module that loads but exports no grammar would otherwise fail later,
     // inside `parser.setLanguage` — the same fault, one file at a time.
     if (!grammar) throw new Error(`${pkg} exports no grammar`);
-    GRAMMARS[lang] = grammar;
+    GRAMMARS.set(lang, grammar);
+    return grammar;
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
     UNAVAILABLE.set(lang, why.split("\n")[0]); // node-gyp-build's message is a paragraph
+    return undefined;
   }
 }
 
@@ -122,7 +141,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
   const p = path.toLowerCase();
   const hit = EXTENSIONS.find((e) => p.endsWith(e.ext));
-  if (hit && UNAVAILABLE.has(hit.grammar)) {
+  if (hit && grammarOf(hit.grammar) === undefined) {
     warnUnavailable(hit.grammar);
     return undefined; // no grammar to parse it with, so this tier does not claim it
   }
@@ -131,8 +150,14 @@ function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
 
 /** Every file extension a depth-tier (hand-written) extractor claims — minus any
  * whose grammar did not load, so `-e` validation and `supportedExtensions()`
- * answer for the install in front of the user rather than for the table. */
+ * answer for the install in front of the user rather than for the table.
+ *
+ * Unlike `entryFor`, this has no specific file to gate on, so it has to settle
+ * the question for every language up front — the one place that still forces
+ * all nine grammars to load. It is reached only from `-e` validation and
+ * `supportedExtensions()`, never from `graft mcp`'s startup path. */
 export function depthExtensions(): string[] {
+  for (const lang of Object.keys(GRAMMAR_MODULES) as Language[]) grammarOf(lang);
   return EXTENSIONS.filter((e) => !UNAVAILABLE.has(e.grammar)).map((e) => e.ext);
 }
 
@@ -381,8 +406,6 @@ const FUNCTION_VALUE_TYPES = new Set([
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
-const parser = new Parser();
-
 export interface WalkCtx {
   rel: string;
   source: string;
@@ -441,11 +464,11 @@ interface DefDescriptor {
  * the source in <32 KB slices. Code-unit indexing matches `String.slice`. */
 const PARSE_CHUNK = 16384;
 function parseSource(source: string): Parser.SyntaxNode {
-  return parser.parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
+  return treeSitter().parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
 }
 
 export function extractFile(rel: string, source: string, lang: Language): ExtractResult {
-  parser.setLanguage(GRAMMARS[lang] as never);
+  treeSitter().setLanguage(grammarOf(lang) as never);
   const root = parseSource(source);
   const bindings = collectBindings(root, lang);
   const importedSymbols = collectImportedSymbols(root, lang);

@@ -16,7 +16,11 @@ import { homedir } from 'node:os';
 import type { PlannedWrite } from './plan.js';
 import { readJsonObject, type ConfigWrite } from './config-write.js';
 
-/** MCP registration reports the same write-result record every installer does. */
+/** MCP registration reports the same write-result record every installer does.
+ *  `registerMcpConfigs`/`claudeGlobalTargets` already drop a host's row entirely
+ *  when `--no-mcp` declines it, so this alias never needs a `'skipped'` variant
+ *  — that literal exists only in claude/init.ts, whose repo-local `.mcp.json`
+ *  write reports the skip explicitly instead of omitting the row. */
 export type McpWrite = ConfigWrite;
 
 /** A planned MCP write, plus the detail needed to actually perform it. */

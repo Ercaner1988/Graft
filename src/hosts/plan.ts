@@ -68,9 +68,9 @@ function instructionTarget(repo: string, host: HostTarget): PlannedWrite {
 export interface PlanInitOptions {
   home?: string;
   ids?: string[];
-  /** `--no-mcp`: skip MCP server registration for the non-Claude hosts. */
+  /** `--no-mcp`: skip MCP server registration, Claude Code included (#118). */
   mcp?: boolean;
-  /** `--no-hooks`: skip hook installation for the non-Claude hosts. */
+  /** `--no-hooks`: skip hook installation, Claude Code included (#118). */
   hooks?: boolean;
   /** `--no-global`: skip every write outside the repo. */
   global?: boolean;
@@ -102,7 +102,10 @@ export function planInit(repo: string, opts: PlanInitOptions = {}): HostPlan[] {
       id: 'claude',
       name: 'Claude Code',
       detected: true,
-      writes: [...claudeTargets(repo), ...(withGlobal ? claudeGlobalTargets(home) : [])],
+      writes: [
+        ...claudeTargets(repo, { mcp: opts.mcp, hooks: opts.hooks }),
+        ...(withGlobal ? claudeGlobalTargets(home, { mcp: opts.mcp, hooks: opts.hooks }) : []),
+      ],
     },
     ...HOSTS.map((host) => ({
       id: host.id,

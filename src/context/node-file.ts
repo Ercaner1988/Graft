@@ -23,11 +23,13 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import matter from "gray-matter";
+import { matter } from "../util/front-matter.js";
 import { contentHash, normalizeName } from "../util/id.js";
 import { relPosix, stripTrailingSlashes } from "../util/paths.js";
 // Value-only import of a constant; `write.ts` pulls in nothing from here, so no cycle.
 import { GRAPH_DIR } from "../graph/write.js";
+import { mapDirFor, isTrailMapDir } from "./map-dir.js";
+import { ignoreInTrailDir } from "../notes/repo-trail.js";
 
 /** A source file a node was derived from, with its content hash at generation time. */
 export interface SourceRef {
@@ -103,12 +105,13 @@ export function digestSources(sources: SourceRef[]): string {
   return contentHash(lines);
 }
 
-/** Absolute path of the `graft/` directory for a repo root. Visible (not
- * dot-prefixed) on purpose: default ripgrep skips hidden dirs, so the agent's
- * grep/ls/find reflex must be able to land on the graph. */
+/** Absolute path of a repo's code map: `graft/`, or `.trail/cache/` in a repo
+ * on trail (see context/map-dir.ts). An explicit `--dir` wins. `graft/` is
+ * visible (not dot-prefixed) on purpose: default ripgrep skips hidden dirs, so
+ * a grep can land on its cards; under trail the hooks name the path instead. */
 export function contextDirFor(root: string, override?: string): string {
   if (override) return override;
-  return join(root, "graft");
+  return mapDirFor(root);
 }
 
 /**
@@ -120,8 +123,19 @@ export function contextDirFor(root: string, override?: string): string {
  * expressed as a repo-relative ignore). Best-effort: an unwritable `.gitignore`
  * must never abort a build, so write failures are swallowed.
  */
-export function ensureGitignored(root: string, contextDir: string): void {
+const GRAPH_CACHE_NOTE = "graft's local graph cache — regenerable, not committed (run `graft build`).";
+
+/** Why `.graft/` is ignored, which is a different reason: not that it is cheap
+ *  to regenerate, but that it holds a token. */
+export const LINK_NOTE = "graft's brain link — holds a read token, never commit it.";
+
+export function ensureGitignored(root: string, contextDir: string, note = GRAPH_CACHE_NOTE): void {
   if (envTruthy("GRAFT_NO_GITIGNORE")) return;
+  // trail's map: `.trail/.gitignore` keeps it out, and the repo's own file is never touched.
+  if (isTrailMapDir(root, contextDir)) {
+    try { ignoreInTrailDir(root, "cache/"); } catch { /* best-effort */ }
+    return;
+  }
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // dir is at/above the repo root — nothing sane to ignore
   const bare = stripTrailingSlashes(rel); // "graft" (or a `--dir` subpath like "tools/ctx")
@@ -141,7 +155,7 @@ export function ensureGitignored(root: string, contextDir: string): void {
   });
   if (present) return;
   const gap = current === "" ? "" : current.endsWith("\n") ? "\n" : "\n\n";
-  const block = `${gap}# graft's local graph cache — regenerable, not committed (run \`graft build\`).\n${entry}\n`;
+  const block = `${gap}# ${note}\n${entry}\n`;
   try { writeFileSync(path, current + block); } catch { /* best-effort — build already succeeded */ }
 }
 
@@ -167,6 +181,8 @@ export function ensureGitignored(root: string, contextDir: string): void {
  */
 export function ensureSearchable(root: string, contextDir: string): void {
   if (envTruthy("GRAFT_NO_IGNORE")) return;
+  // trail's map is reached by the path the hooks name, not by a grep from the root: no `.ignore`.
+  if (isTrailMapDir(root, contextDir)) return;
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // outside the repo — nothing to re-admit
   const dir = stripTrailingSlashes(rel);

@@ -35,7 +35,7 @@ test('runInit scaffolds settings + both shims + the skill (build skipped)', () =
   const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
   assert.ok(s.statusLine.command.includes('graft-statusline.cjs'));
   assert.ok(s.hooks.Stop[0].hooks[0].command.includes('graft-hooks.cjs'));
-  assert.deepEqual(s.permissions.allow, ['Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
+  assert.deepEqual(s.permissions.allow, ['Bash(trail:*)', 'Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
 });
 
 test('runInit overwrites a stale skill file', () => {
@@ -84,7 +84,7 @@ test('CLI: --no-statusline leaves statusLine unset', () => {
   const d = fresh();
   const res = spawnSync(
     process.execPath,
-    ['--import', 'tsx', 'src/cli.ts', 'init', d, '--no-build', '--no-agents', '--no-statusline'],
+    ['--import', 'tsx', 'src/cli.ts', 'init', d, '--no-build', '--no-agents', '--no-statusline', '--verbose'],
     { encoding: 'utf8' },
   );
   assert.equal(res.status, 0, res.stderr);
@@ -101,7 +101,7 @@ test('runInit is idempotent', () => {
   runInit(d, { build: false, home: fresh() });
   const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
   assert.equal(s.hooks.PostToolUse.length, 2); // post-edit + tool-savings, not duplicated on re-init
-  assert.deepEqual(s.permissions.allow, ['Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
+  assert.deepEqual(s.permissions.allow, ['Bash(trail:*)', 'Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
 });
 
 test('runInit appends the allowlist to a pre-existing permissions block, preserving unrelated entries', () => {
@@ -110,7 +110,7 @@ test('runInit appends the allowlist to a pre-existing permissions block, preserv
   writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: ['Bash(ls)'] } }));
   runInit(d, { build: false, home: fresh() });
   const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
-  assert.deepEqual(s.permissions.allow, ['Bash(ls)', 'Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
+  assert.deepEqual(s.permissions.allow, ['Bash(ls)', 'Bash(trail:*)', 'Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
 });
 
 test('postinstall prints the nudge in a fresh dir', () => {
@@ -160,11 +160,27 @@ test('formatInitEpilogue: graph not built shows "build the graph" as step 1, no 
   assert.equal(col(built, 'restart your agent'), col(notBuilt, 'restart your agent'));
 });
 
-test('CLI: graft init epilogue has the wordmark + next steps, and never mentions OPENROUTER', () => {
+test('CLI: graft init prints one line per step, and no banner', () => {
   const d = fresh();
   const res = spawnSync(
     process.execPath,
     ['--import', 'tsx', 'src/cli.ts', 'init', d, '--no-build', '--no-agents'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stderr, /skipped the graph build — run graft build/);
+  assert.match(res.stderr, /✓ claude +\.claude[\\/], \.mcp\.json/);
+  assert.match(res.stderr, /restart your agents so a new session picks up graft/);
+  assert.match(res.stderr, /commit \.claude\/ \.mcp\.json to share it — graft\/ stays local and git-ignored/);
+  assert.ok(!res.stderr.includes('|___/'), 'the banner is --verbose only');
+  assert.ok(!res.stderr.includes('✓ wrote'), 'file-by-file lines are --verbose only');
+});
+
+test('CLI: graft init --verbose epilogue has the wordmark + next steps, and never mentions OPENROUTER', () => {
+  const d = fresh();
+  const res = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', 'src/cli.ts', 'init', d, '--no-build', '--no-agents', '--verbose'],
     { encoding: 'utf8' },
   );
   assert.equal(res.status, 0, res.stderr);
